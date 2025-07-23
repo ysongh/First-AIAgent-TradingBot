@@ -14,15 +14,13 @@ SANDBOX_API = "https://api.sandbox.competitions.recall.network"
 TOKEN_MAP = {                                     # main‑net addresses (sandbox forks main‑net)
     "USDC": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",  # 6 dec
     "WETH": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",  # 18 dec
-    "WBTC": "0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599",  # 8 dec
 }
  
-DECIMALS = {"USDC": 6, "WETH": 18, "WBTC": 8}
+DECIMALS = {"USDC": 6, "WETH": 18}
  
 COINGECKO_IDS = {                                 # symbol → CG id
     "USDC": "usd-coin",
     "WETH": "weth",
-    "WBTC": "wrapped-bitcoin",
 }
  
 DRIFT_THRESHOLD = 0.02    # rebalance if > 2 % off target
@@ -83,6 +81,32 @@ def fetch_holdings() -> dict[str, float]:
 #  Trading logic
 # ------------------------------------------------------------
 def compute_orders(targets, prices, holdings):
+    """Return a list of {'symbol','side','amount_float','usd_value'} trades."""
+    total_value = sum(holdings.get(s, 0) * prices[s] for s in targets)
+    if total_value == 0:
+        raise ValueError("No balances found; fund your sandbox wallet first.")
+ 
+    overweight, underweight = [], []
+    for sym, weight in targets.items():
+        current_val = holdings.get(sym, 0) * prices[sym]
+        target_val  = total_value * weight
+        drift_pct   = (current_val - target_val) / total_value
+        if abs(drift_pct) >= DRIFT_THRESHOLD:
+            delta_val = abs(target_val - current_val)
+            token_amt = delta_val / prices[sym]
+            side      = "sell" if drift_pct > 0 else "buy"
+            
+            order = {
+                "symbol": sym, 
+                "side": side, 
+                "amount_float": token_amt,
+                "usd_value": delta_val  # Add USD value for proper amount calculation
+            }
+            
+            (overweight if side == "sell" else underweight).append(order)
+ 
+    # Execute sells first so we have USDC to fund buys
+    return overweight + underweight
     """Return a list of {'symbol','side','amount_float'} trades."""
     total_value = sum(holdings.get(s, 0) * prices[s] for s in targets)
     if total_value == 0:
@@ -104,7 +128,142 @@ def compute_orders(targets, prices, holdings):
     # Execute sells first so we have USDC to fund buys
     return overweight + underweight
  
-def execute_trade(symbol, side, amount_float):
+def execute_trade(symbol, side, amount_float, usd_value=None):
+    # Skip USDC trades since we can't trade USDC for USDC
+    if symbol == "USDC":
+        print(f"⚠️ Skipping {side} {amount_float} USDC (cannot trade USDC for USDC)")
+        return {"status": "skipped", "reason": "Cannot trade USDC for USDC"}
+    
+    from_token, to_token = (
+        (TOKEN_MAP[symbol], TOKEN_MAP["USDC"]) if side == "sell"
+        else (TOKEN_MAP["USDC"], TOKEN_MAP[symbol])
+    )
+ 
+    # For buy orders, amount should be in USDC (what we're spending)
+    # For sell orders, amount should be in the token we're selling
+    if side == "buy":
+        # Use the USD value to determine how much USDC to spend
+        amount_to_use = usd_value if usd_value else amount_float * 3500  # rough WETH price fallback
+        decimals_to_use = DECIMALS["USDC"]
+    else:
+        amount_to_use = amount_float
+        decimals_to_use = DECIMALS[symbol]
+    
+    payload = {
+        "fromToken": from_token,
+        "toToken":   to_token,
+        "amount":    to_base_units(amount_to_use, decimals_to_use),
+        "reason":    "Automatic portfolio rebalance",
+    }
+    
+    # Debug logging
+    print(f"🔍 Trading {side} {amount_float} {symbol}")
+    print(f"🔍 Payload: {json.dumps(payload, indent=2)}")
+    
+    r = requests.post(
+        f"{SANDBOX_API}/api/trade/execute",
+        json=payload,
+        headers={
+            "Authorization": f"Bearer {RECALL_KEY}",
+            "Content-Type":  "application/json",
+        },
+        timeout=20,
+    )
+    
+    # Debug the response before raising for status
+    print(f"🔍 Response Status: {r.status_code}")
+    print(f"🔍 Response Body: {r.text}")
+    
+    if not r.ok:
+        print(f"❌ Trade failed: {r.status_code} - {r.text}")
+        return {"status": "failed", "error": r.text}
+    
+    return r.json()
+    # Skip USDC trades since we can't trade USDC for USDC
+    if symbol == "USDC":
+        print(f"⚠️ Skipping {side} {amount_float} USDC (cannot trade USDC for USDC)")
+        return {"status": "skipped", "reason": "Cannot trade USDC for USDC"}
+    
+    from_token, to_token = (
+        (TOKEN_MAP[symbol], TOKEN_MAP["USDC"]) if side == "sell"
+        else (TOKEN_MAP["USDC"], TOKEN_MAP[symbol])
+    )
+ 
+    # For buy orders, use USDC decimals for amount calculation
+    decimals_to_use = DECIMALS["USDC"] if side == "buy" else DECIMALS[symbol]
+    
+    payload = {
+        "fromToken": from_token,
+        "toToken":   to_token,
+        "amount":    to_base_units(amount_float, decimals_to_use),
+        "reason":    "Automatic portfolio rebalance",
+    }
+    
+    # Debug logging
+    print(f"🔍 Trading {side} {amount_float} {symbol}")
+    print(f"🔍 Payload: {json.dumps(payload, indent=2)}")
+    
+    r = requests.post(
+        f"{SANDBOX_API}/api/trade/execute",
+        json=payload,
+        headers={
+            "Authorization": f"Bearer {RECALL_KEY}",
+            "Content-Type":  "application/json",
+        },
+        timeout=20,
+    )
+    
+    # Debug the response before raising for status
+    print(f"🔍 Response Status: {r.status_code}")
+    print(f"🔍 Response Body: {r.text}")
+    
+    if not r.ok:
+        print(f"❌ Trade failed: {r.status_code} - {r.text}")
+        return {"status": "failed", "error": r.text}
+    
+    return r.json()
+
+    if symbol == "USDC":
+        print(f"⚠️ Skipping {side} {amount_float} USDC (cannot trade USDC for USDC)")
+        return {"status": "skipped", "reason": "Cannot trade USDC for USDC"}
+    
+
+    from_token, to_token = (
+        (TOKEN_MAP[symbol], TOKEN_MAP["USDC"]) if side == "sell"
+        else (TOKEN_MAP["USDC"], TOKEN_MAP[symbol])
+    )
+ 
+    payload = {
+        "fromToken": from_token,
+        "toToken":   to_token,
+        "amount":    to_base_units(amount_float, DECIMALS[symbol]),
+        "reason":    "Automatic portfolio rebalance",
+    }
+    
+    # Debug logging
+    print(f"🔍 Trading {side} {amount_float} {symbol}")
+    print(f"🔍 Payload: {json.dumps(payload, indent=2)}")
+    
+    r = requests.post(
+        f"{SANDBOX_API}/api/trade/execute",
+        json=payload,
+        headers={
+            "Authorization": f"Bearer {RECALL_KEY}",
+            "Content-Type":  "application/json",
+        },
+        timeout=20,
+    )
+    
+    # Debug the response before raising for status
+    print(f"🔍 Response Status: {r.status_code}")
+    print(f"🔍 Response Body: {r.text}")
+    
+    if not r.ok:
+        print(f"❌ Trade failed: {r.status_code} - {r.text}")
+        # Don't raise the exception yet, let's see what the error is
+        return {"status": "failed", "error": r.text}
+    
+    return r.json()
     from_token, to_token = (
         (TOKEN_MAP[symbol], TOKEN_MAP["USDC"]) if side == "sell"
         else (TOKEN_MAP["USDC"], TOKEN_MAP[symbol])
@@ -164,15 +323,24 @@ def rebalance():
     targets   = ai_adjust_targets(targets)
     prices    = fetch_prices(list(targets.keys()))
     holdings  = fetch_holdings()
+    
+    # Debug logging
+    print(f"🔍 Targets: {targets}")
+    print(f"🔍 Prices: {prices}")
+    print(f"🔍 Holdings: {holdings}")
+    
     orders    = compute_orders(targets, prices, holdings)
  
     if not orders:
-        print("✅ Portfolio already within ±2 % of target.")
+        print("✅ Portfolio already within ±2 % of target.")
         return
+    
+    print(f"🔍 Generated orders: {orders}")
  
     for order in orders:
-        res = execute_trade(**order)
-        print("Executed", order, "→", res["status"])
+        print(f"🔄 Executing order: {order}")
+        res = execute_trade(order["symbol"], order["side"], order["amount_float"], order.get("usd_value"))
+        print("Executed", order, "→", res.get("status", "unknown"))
  
     print("🎯 Rebalance complete.")
  

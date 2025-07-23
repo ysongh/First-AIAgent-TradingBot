@@ -56,11 +56,12 @@ def fetch_prices(symbols: list[str]) -> dict[str, float]:
 def fetch_holdings() -> dict[str, float]:
     """Return whole‑token balances from Recall’s sandbox."""
     r = requests.get(
-        f"{SANDBOX_API}/api/balance",
+        f"{SANDBOX_API}/api/agent/balances",
         headers={"Authorization": f"Bearer {RECALL_KEY}"},
         timeout=10,
     )
     r.raise_for_status()
+    print("✅  Balances:", r.json())
     return r.json()        # → {"USDC": 123.45, ...}
  
 # ------------------------------------------------------------

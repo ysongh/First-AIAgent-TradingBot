@@ -61,14 +61,29 @@ def fetch_holdings() -> dict[str, float]:
         timeout=10,
     )
     r.raise_for_status()
-    print("✅  Balances:", r.json())
-    return r.json()        # → {"USDC": 123.45, ...}
+    data = r.json()
+
+    print("✅  Balances:", data)
+
+    # Parse the nested response structure
+    holdings = {}
+    for balance in data.get('balances', []):
+        symbol = balance['symbol']
+        amount = balance['amount']
+        
+        # Aggregate balances by symbol (in case there are multiple chains)
+        if symbol in holdings:
+            holdings[symbol] += amount
+        else:
+            holdings[symbol] = amount
+    
+    return holdings        # → {"USDC": 123.45, ...}
  
 # ------------------------------------------------------------
 #  Trading logic
 # ------------------------------------------------------------
 def compute_orders(targets, prices, holdings):
-    """Return a list of {'symbol','side','amount'} trades."""
+    """Return a list of {'symbol','side','amount_float'} trades."""
     total_value = sum(holdings.get(s, 0) * prices[s] for s in targets)
     if total_value == 0:
         raise ValueError("No balances found; fund your sandbox wallet first.")
@@ -83,7 +98,7 @@ def compute_orders(targets, prices, holdings):
             token_amt = delta_val / prices[sym]
             side      = "sell" if drift_pct > 0 else "buy"
             (overweight if side == "sell" else underweight).append(
-                {"symbol": sym, "side": side, "amount": token_amt}
+                {"symbol": sym, "side": side, "amount_float": token_amt}
             )
  
     # Execute sells first so we have USDC to fund buys
